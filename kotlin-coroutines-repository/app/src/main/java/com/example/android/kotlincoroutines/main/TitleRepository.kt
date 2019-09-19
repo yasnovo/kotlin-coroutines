@@ -21,10 +21,13 @@ import androidx.lifecycle.Transformations
 import com.example.android.kotlincoroutines.main.TitleRepository.RefreshState.Success
 import com.example.android.kotlincoroutines.main.TitleRepository.RefreshState.Error
 import com.example.android.kotlincoroutines.main.TitleRepository.RefreshState.Loading
-import com.example.android.kotlincoroutines.util.BACKGROUND
-import com.example.android.kotlincoroutines.util.FakeNetworkError
-import com.example.android.kotlincoroutines.util.FakeNetworkSuccess
+import com.example.android.kotlincoroutines.util.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.LazyThreadSafetyMode.NONE
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlin.coroutines.suspendCoroutine
 
 /**
  * TitleRepository provides an interface to fetch a title or request a new one be generated.
@@ -61,21 +64,13 @@ class TitleRepository(private val network: MainNetwork, private val titleDao: Ti
      * @param onStateChanged callback called when state changes to Loading, Success, or Error
      */
     // TODO: Reimplement with coroutines and remove state listener
-    fun refreshTitle(onStateChanged: TitleStateListener) {
-        onStateChanged(Loading)
-        val call = network.fetchNewWelcome()
-        call.addOnResultListener { result ->
-            when (result) {
-                is FakeNetworkSuccess<String> -> {
-                    BACKGROUND.submit {
-                        // run insertTitle on a background thread
-                        titleDao.insertTitle(Title(result.data))
-                    }
-                    onStateChanged(Success)
-                }
-                is FakeNetworkError -> {
-                    onStateChanged(Error(TitleRefreshError(result.error)))
-                }
+    suspend fun refreshTitle() {
+        withContext(Dispatchers.IO) {
+            try {
+                val result = network.fetchNewWelcome().await()
+                titleDao.insertTitle(Title(result))
+            } catch (error: FakeNetworkException) {
+                throw TitleRefreshError(error)
             }
         }
     }
@@ -133,3 +128,14 @@ class TitleRefreshError(cause: Throwable) : Throwable(cause.message, cause)
  * @throws Throwable original exception from library if network request fails
  */
 // TODO: Implement FakeNetworkCall<T>.await() here
+suspend fun <T> FakeNetworkCall<T>.await() : T {
+    return suspendCoroutine {
+        continuation ->
+        addOnResultListener { result ->
+            when (result) {
+                is FakeNetworkSuccess<T> -> continuation.resume(result.data)
+                is FakeNetworkError -> continuation.resumeWithException(result.error)
+            }
+        }
+    }
+}
